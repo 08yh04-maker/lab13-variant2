@@ -1,0 +1,18 @@
+.PHONY: build-classifier build-kb build-responder build-escalator build-all
+
+build-classifier:
+	cd agents/classifier && go build -o ../../bin/classifier.exe .
+
+build-kb:
+	cd agents/kb_search && go build -o ../../bin/kb_search.exe .
+
+build-responder:
+	cd agents/responder && go build -o ../../bin/responder.exe .
+
+build-escalator:
+	cd agents/escalator && go build -o ../../bin/escalator.exe .
+
+build-all: build-classifier build-kb build-responder build-escalator
+
+clean:
+	rm -rf bin/
