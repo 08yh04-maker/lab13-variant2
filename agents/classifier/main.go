@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"strings"
@@ -8,10 +9,18 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/08yh04-maker/lab13-variant2/pkg"
+	"go.opentelemetry.io/otel/attribute"
 )
 
-func classifyTicket(ticket *pkg.Ticket) (*pkg.Ticket, error) {
-	// Простая логика классификации
+func classifyTicket(ctx context.Context, ticket *pkg.Ticket) (*pkg.Ticket, error) {
+	_, span := pkg.GetTracer().Start(ctx, "classifyTicket")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("ticket.id", ticket.ID),
+		attribute.String("ticket.title", ticket.Title),
+	)
+
 	title := strings.ToLower(ticket.Title)
 	desc := strings.ToLower(ticket.Description)
 
@@ -30,20 +39,50 @@ func classifyTicket(ticket *pkg.Ticket) (*pkg.Ticket, error) {
 	}
 
 	ticket.Status = "classified"
+	
+	span.SetAttributes(
+		attribute.String("ticket.category", ticket.Category),
+		attribute.String("ticket.priority", ticket.Priority),
+	)
+
 	return ticket, nil
 }
 
 func main() {
+	// Инициализируем трассировку
+	shutdown := pkg.InitTracer("classifier-agent")
+	defer shutdown()
+
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer nc.Close()
 
-	log.Println("Classifier agent started")
+	log.Println("Classifier agent started with tracing")
 
-	agent := pkg.NewAgent("Classifier", "tickets.classify", "tickets.classified", nc)
-	if err := agent.Start(classifyTicket); err != nil {
+	_, err = nc.Subscribe("tickets.classify", func(msg *nats.Msg) {
+		var ticket pkg.Ticket
+		if err := json.Unmarshal(msg.Data, &ticket); err != nil {
+			log.Printf("Failed to parse ticket: %v", err)
+			return
+		}
+
+		ctx := context.Background()
+		result, err := classifyTicket(ctx, &ticket)
+		if err != nil {
+			log.Printf("Error processing ticket: %v", err)
+			ticket.Status = "failed"
+			result = &ticket
+		}
+
+		result.UpdatedAt = time.Now()
+		responseData, _ := json.Marshal(result)
+		nc.Publish("tickets.classified", responseData)
+		log.Printf("Completed ticket %s", ticket.ID)
+	})
+
+	if err != nil {
 		log.Fatal(err)
 	}
 

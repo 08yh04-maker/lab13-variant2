@@ -2,6 +2,7 @@ import asyncio
 import json
 import uuid
 import logging
+from .tracing import init_tracing
 from datetime import datetime
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
@@ -126,9 +127,18 @@ app = FastAPI(
 )
 
 
+tracer = init_tracing(app, "orchestrator")
+
 @app.post("/ticket", response_model=TicketStatus)
 async def create_ticket(request: TicketRequest):
-    try:
+     from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
+    
+    with tracer.start_as_current_span("process_ticket_pipeline") as span:
+        span.set_attribute("ticket.title", title)
+        
+        ticket_id = str(uuid.uuid4())
+try:
         result = await orchestrator.process_ticket_pipeline(
             title=request.title,
             description=request.description
@@ -146,6 +156,8 @@ async def create_ticket(request: TicketRequest):
     except Exception as e:
         logger.error(f"Error processing ticket: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+span.set_attribute("ticket.id", ticket_id)
 
 
 @app.get("/ticket/{ticket_id}/status", response_model=TicketStatus)
