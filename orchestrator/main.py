@@ -2,7 +2,6 @@ import asyncio
 import json
 import uuid
 import logging
-from .tracing import init_tracing
 from datetime import datetime
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
@@ -11,9 +10,7 @@ import nats
 from nats.aio.client import Client as NATS
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from .auction import auction_house
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -25,7 +22,6 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 
-# Pydantic модели
 class TicketRequest(BaseModel):
     title: str
     description: str
@@ -45,7 +41,6 @@ class Orchestrator:
         self.nc: Optional[NATS] = None
         self.results: Dict[str, asyncio.Future] = {}
         self.tickets: Dict[str, dict] = {}
-        self.task_counter = 0
         self.processed_counter = 0
 
     async def connect(self):
@@ -63,47 +58,33 @@ class Orchestrator:
         if ticket_id in self.results:
             self.results[ticket_id].set_result(data)
             self.processed_counter += 1
-            logger.info(f"Task {ticket_id} completed. Total processed: {self.processed_counter}")
+            logger.info(f"Task {ticket_id} completed")
 
-   async def process_ticket_pipeline(self, title: str, description: str, timeout: int = 60) -> dict:
-    from opentelemetry import trace
-    tracer = trace.get_tracer(__name__)
-    
-    with tracer.start_as_current_span("process_ticket_pipeline") as span:
-        span.set_attribute("ticket.title", title)
-        
+    def _guess_category(self, title: str, description: str) -> str:
+        text = (title + " " + description).lower()
+        if "password" in text or "login" in text:
+            return "account"
+        elif "bug" in text or "error" in text or "crash" in text:
+            return "technical"
+        elif "payment" in text or "bill" in text or "invoice" in text:
+            return "billing"
+        return "general"
+
+    async def process_ticket_pipeline(self, title: str, description: str, timeout: int = 60) -> dict:
         ticket_id = str(uuid.uuid4())
         
-        # Аукцион: выбираем лучшего агента для обработки
-        # Сначала определяем категорию (предварительно)
+        # Предварительная классификация для выбора агента
         temp_category = self._guess_category(title, description)
         
-        # Запускаем аукцион
-        winner = await auction_house.start_auction(ticket_id, temp_category, "medium")
-        
-        if winner:
-            logger.info(f"Ticket {ticket_id} assigned to {winner.agent_id} via auction")
-            span.set_attribute("auction.winner", winner.agent_id)
-            span.set_attribute("auction.price", winner.bid_price)
-        
-        # Продолжаем обычный pipeline...
         ticket = {
             "id": ticket_id,
             "title": title,
             "description": description,
+            "category": temp_category,
+            "priority": "medium",
             "status": "new",
             "created_at": datetime.now().isoformat()
         }
-       
-def _guess_category(self, title: str, description: str) -> str:
-    text = (title + " " + description).lower()
-    if "password" in text or "login" in text:
-        return "account"
-    elif "bug" in text or "error" in text or "crash" in text:
-        return "technical"
-    elif "payment" in text or "bill" in text or "invoice" in text:
-        return "billing"
-    return "general"
 
         self.tickets[ticket_id] = ticket
         future = asyncio.Future()
@@ -115,7 +96,6 @@ def _guess_category(self, title: str, description: str) -> str:
         await self.nc.publish("tickets.classify", json.dumps(ticket).encode())
         logger.info(f"Ticket {ticket_id} sent to classifier")
 
-        # Шаг 2: Ждём результат после классификации
         try:
             result = await asyncio.wait_for(future, timeout)
             return result
@@ -125,9 +105,7 @@ def _guess_category(self, title: str, description: str) -> str:
             raise TimeoutError(f"Ticket {ticket_id} processing timeout")
 
     async def get_ticket_status(self, ticket_id: str) -> Optional[dict]:
-        if ticket_id in self.tickets:
-            return self.tickets[ticket_id]
-        return None
+        return self.tickets.get(ticket_id)
 
     def get_stats(self) -> dict:
         return {
@@ -137,7 +115,6 @@ def _guess_category(self, title: str, description: str) -> str:
         }
 
 
-# FastAPI приложение
 orchestrator = Orchestrator()
 
 
@@ -156,18 +133,9 @@ app = FastAPI(
 )
 
 
-tracer = init_tracing(app, "orchestrator")
-
 @app.post("/ticket", response_model=TicketStatus)
 async def create_ticket(request: TicketRequest):
-     from opentelemetry import trace
-    tracer = trace.get_tracer(__name__)
-    
-    with tracer.start_as_current_span("process_ticket_pipeline") as span:
-        span.set_attribute("ticket.title", title)
-        
-        ticket_id = str(uuid.uuid4())
-try:
+    try:
         result = await orchestrator.process_ticket_pipeline(
             title=request.title,
             description=request.description
@@ -185,8 +153,6 @@ try:
     except Exception as e:
         logger.error(f"Error processing ticket: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-span.set_attribute("ticket.id", ticket_id)
 
 
 @app.get("/ticket/{ticket_id}/status", response_model=TicketStatus)
