@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+var agentName = "classifier"
+
 func classifyTicket(ctx context.Context, ticket *pkg.Ticket) (*pkg.Ticket, error) {
 	_, span := pkg.GetTracer().Start(ctx, "classifyTicket")
 	defer span.End()
@@ -39,7 +41,11 @@ func classifyTicket(ctx context.Context, ticket *pkg.Ticket) (*pkg.Ticket, error
 	}
 
 	ticket.Status = "classified"
-	
+
+	// Обновляем статистику в Redis
+	pkg.IncrementCounter(agentName, "total_processed")
+	pkg.IncrementCounter(agentName, "category:"+ticket.Category)
+
 	span.SetAttributes(
 		attribute.String("ticket.category", ticket.Category),
 		attribute.String("ticket.priority", ticket.Priority),
@@ -50,8 +56,20 @@ func classifyTicket(ctx context.Context, ticket *pkg.Ticket) (*pkg.Ticket, error
 
 func main() {
 	// Инициализируем трассировку
-	shutdown := pkg.InitTracer("classifier-agent")
+	shutdown := pkg.InitTracer(agentName + "-agent")
 	defer shutdown()
+
+	// Инициализируем Redis
+	pkg.InitRedis()
+
+	// Загружаем состояние
+	var state pkg.AgentState
+	if err := state.Load(agentName); err != nil {
+		log.Printf("Error loading state: %v", err)
+	} else {
+		log.Printf("Loaded state: processed=%d, start_time=%v",
+			state.TotalProcessed, state.StartTime)
+	}
 
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
@@ -59,7 +77,7 @@ func main() {
 	}
 	defer nc.Close()
 
-	log.Println("Classifier agent started with tracing")
+	log.Println("Classifier agent started with Redis state")
 
 	_, err = nc.Subscribe("tickets.classify", func(msg *nats.Msg) {
 		var ticket pkg.Ticket
@@ -80,6 +98,12 @@ func main() {
 		responseData, _ := json.Marshal(result)
 		nc.Publish("tickets.classified", responseData)
 		log.Printf("Completed ticket %s", ticket.ID)
+
+		// Обновляем и сохраняем состояние
+		total, _ := pkg.GetCounter(agentName, "total_processed")
+		state.TotalProcessed = int(total)
+		state.LastProcessed = time.Now()
+		state.Save(agentName)
 	})
 
 	if err != nil {
