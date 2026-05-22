@@ -11,6 +11,7 @@ import nats
 from nats.aio.client import Client as NATS
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from .auction import auction_house
 
 # Настройка логирования
 logging.basicConfig(
@@ -64,10 +65,28 @@ class Orchestrator:
             self.processed_counter += 1
             logger.info(f"Task {ticket_id} completed. Total processed: {self.processed_counter}")
 
-    async def process_ticket_pipeline(self, title: str, description: str, timeout: int = 60) -> dict:
-        """Pipeline: классификация → поиск в БЗ → генерация ответа → эскалация (если нужно)"""
+   async def process_ticket_pipeline(self, title: str, description: str, timeout: int = 60) -> dict:
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
+    
+    with tracer.start_as_current_span("process_ticket_pipeline") as span:
+        span.set_attribute("ticket.title", title)
+        
         ticket_id = str(uuid.uuid4())
         
+        # Аукцион: выбираем лучшего агента для обработки
+        # Сначала определяем категорию (предварительно)
+        temp_category = self._guess_category(title, description)
+        
+        # Запускаем аукцион
+        winner = await auction_house.start_auction(ticket_id, temp_category, "medium")
+        
+        if winner:
+            logger.info(f"Ticket {ticket_id} assigned to {winner.agent_id} via auction")
+            span.set_attribute("auction.winner", winner.agent_id)
+            span.set_attribute("auction.price", winner.bid_price)
+        
+        # Продолжаем обычный pipeline...
         ticket = {
             "id": ticket_id,
             "title": title,
@@ -75,6 +94,16 @@ class Orchestrator:
             "status": "new",
             "created_at": datetime.now().isoformat()
         }
+       
+def _guess_category(self, title: str, description: str) -> str:
+    text = (title + " " + description).lower()
+    if "password" in text or "login" in text:
+        return "account"
+    elif "bug" in text or "error" in text or "crash" in text:
+        return "technical"
+    elif "payment" in text or "bill" in text or "invoice" in text:
+        return "billing"
+    return "general"
 
         self.tickets[ticket_id] = ticket
         future = asyncio.Future()
